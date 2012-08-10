@@ -490,3 +490,16 @@ class NfsNoSharesMounted(NotFound):
 
 class NfsNoSuitableShareFound(NotFound):
     message = _("There is no share which can host %(volume_size)sG")
+
+
+class VolumeBackendNotFound(NotFound):
+    message = _("Volume backend %(volume_backend_id)s could not be found.")
+
+
+class VolumeBackendNotFoundByName(VolumeBackendNotFound):
+    message = _("Volume backend with name %(volume_backend_name)s "
+                "could not be found.")
+
+
+class VolumeBackendExists(Duplicate):
+    message = _("Volume Backend %(name)s already exists.")

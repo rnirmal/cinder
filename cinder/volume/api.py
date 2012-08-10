@@ -80,8 +80,8 @@ class API(base.Base):
         super(API, self).__init__(db_driver)
 
     def create(self, context, size, name, description, snapshot=None,
-                image_id=None, volume_type=None, metadata=None,
-                availability_zone=None):
+               image_id=None, volume_type=None, metadata=None,
+               availability_zone=None, backend=None):
         check_policy(context, 'create')
         if snapshot is not None:
             if snapshot['status'] != "available":
@@ -149,6 +149,11 @@ class API(base.Base):
         else:
             volume_type_id = volume_type.get('id', None)
 
+        backend_id = None
+        if backend is not None:
+            backend_ref = self.db.volume_backend_get_by_name(context, backend)
+            backend_id = backend_ref['id']
+
         options = {
             'size': size,
             'user_id': context.user_id,
@@ -161,6 +166,7 @@ class API(base.Base):
             'display_description': description,
             'volume_type_id': volume_type_id,
             'metadata': metadata,
+            'backend_id': backend_id,
             }
 
         volume = self.db.volume_create(context, options)

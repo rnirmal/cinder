@@ -156,6 +156,7 @@ class Volume(BASE, CinderBase):
     provider_auth = Column(String(255))
 
     volume_type_id = Column(Integer)
+    backend_id = Column(Integer)  # ForeignKey('volume_backends.id')
 
 
 class VolumeMetadata(BASE, CinderBase):
@@ -203,6 +204,21 @@ class VolumeTypeExtraSpecs(BASE, CinderBase):
         'VolumeTypeExtraSpecs.volume_type_id == VolumeTypes.id,'
         'VolumeTypeExtraSpecs.deleted == False)'
     )
+
+
+class VolumeBackends(BASE, CinderBase):
+    """Represent possible volume_backends for the volumes offered"""
+    __tablename__ = "volume_backends"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    description = Column(String(255))
+
+    volumes = relationship(Volume,
+                           backref=backref('volume_backend', uselist=False),
+                           foreign_keys=id,
+                           primaryjoin='and_('
+                                    'Volume.backend_id == VolumeBackends.id, '
+                                    'VolumeBackends.deleted == False)')
 
 
 class Quota(BASE, CinderBase):

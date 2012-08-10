@@ -375,6 +375,34 @@ def volume_type_extra_specs_update_or_create(context, volume_type_id,
 ###################
 
 
+def volume_backend_create(context, values):
+    """Create a new volume backend mapping."""
+    return IMPL.volume_backend_create(context, values)
+
+
+def volume_backend_get(context, id):
+    """Get volume backend by id."""
+    return IMPL.volume_backend_get(context, id)
+
+
+def volume_backend_get_by_name(context, name):
+    """Get volume backend by name."""
+    return IMPL.volume_backend_get_by_name(context, name)
+
+
+def volume_backend_get_all(context):
+    """Get all the volume backends."""
+    return IMPL.volume_backend_get_all(context)
+
+
+def volume_backend_destroy(context, name):
+    """Delete a volume backend."""
+    return IMPL.volume_backend_destroy(context, name)
+
+
+###################
+
+
 def sm_backend_conf_create(context, values):
     """Create a new SM Backend Config entry."""
     return IMPL.sm_backend_conf_create(context, values)

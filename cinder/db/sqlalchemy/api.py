@@ -1463,6 +1463,74 @@ def volume_type_extra_specs_update_or_create(context, volume_type_id,
 
 
 @require_admin_context
+def volume_backend_create(context, values):
+    """Create a new volume backend."""
+    session = get_session()
+    with session.begin():
+        try:
+            volume_backend_get_by_name(context, values['name'], session)
+            raise exception.VolumeBackendExists(name=values['name'])
+        except exception.VolumeBackendNotFoundByName:
+            pass
+        try:
+            volume_backend_ref = models.VolumeBackends()
+            volume_backend_ref.update(values)
+            volume_backend_ref.save()
+        except Exception, e:
+            raise exception.DBError(e)
+        return volume_backend_ref
+
+
+@require_context
+def volume_backend_get(context, id, session=None):
+    """Returns a specific volume_backend"""
+    result = model_query(context, models.VolumeBackends, session=session).\
+    filter_by(id=id).\
+    first()
+
+    if not result:
+        raise exception.VolumeBackendNotFound(volume_backend_id=id)
+
+    return result
+
+
+@require_context
+def volume_backend_get_by_name(context, name, session=None):
+    """Returns a specific volume_backend by name"""
+    result = model_query(context, models.VolumeBackends, session=session).\
+    filter_by(name=name).\
+    first()
+
+    if not result:
+        raise exception.VolumeBackendNotFoundByName(volume_backend_name=name)
+
+    return result
+
+
+@require_context
+def volume_backend_get_all(context, session=None):
+    """Returns all volume backends."""
+    return model_query(context, models.VolumeBackends, session=session).all()
+
+
+@require_admin_context
+def volume_backend_destroy(context, name):
+    session = get_session()
+    with session.begin():
+        volume_backend_ref = volume_backend_get_by_name(context, name,
+                                                        session=session)
+        volume_backend_id = volume_backend_ref['id']
+        session.query(models.VolumeBackends).\
+        filter_by(id=volume_backend_id).\
+        update({'deleted': True,
+                'deleted_at': timeutils.utcnow(),
+                'updated_at': literal_column('updated_at')})
+
+
+####################
+
+
+@require_admin_context
 def sm_backend_conf_create(context, values):
     backend_conf = models.SMBackendConf()
     backend_conf.update(values)

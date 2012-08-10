@@ -427,6 +427,38 @@ class VolumeCommands(object):
                            "mountpoint": volume['mountpoint']}})
 
 
+class VolumeBackendCommands(object):
+    """Methods for adding/deleting volume backends."""
+
+    @args('--name', dest='name', metavar='<name>',
+          help='Backend name')
+    @args('--desc', dest='desc', metavar='<desc>',
+          help='Description')
+    def create(self, name, desc):
+        """Create a volume backend entry."""
+        ctxt = context.get_admin_context()
+        ref = db.volume_backend_create(ctxt, {'name': name,
+                                              'description': desc})
+        print "Created volume backend: %s with id: %s"\
+        % (ref['name'], ref['id'])
+
+    @args('--name', dest='name', metavar='<name>',
+          help='Backend name')
+    def delete(self, name):
+        """Delete the specified volume backend entry."""
+        ctxt = context.get_admin_context()
+        db.volume_backend_destroy(ctxt, name)
+        print "Deleted volume backend: %s" % name
+
+    def list(self):
+        """List all the volume backend entries."""
+        ctxt = context.get_admin_context()
+        result = db.volume_backend_get_all(ctxt)
+        print "%-5s%-12s%-20s" % ("ID", "Name", "Description")
+        for row in result:
+            print "%-5s%-12s%-20s" % (row['id'], row['name'], row.description)
+
+
 class StorageManagerCommands(object):
     """Class for mangaging Storage Backends and Flavors"""
 
@@ -635,6 +667,7 @@ CATEGORIES = [
     ('version', VersionCommands),
     ('volume', VolumeCommands),
     ('migrate', ImportCommands),
+    ('volume_backend', VolumeBackendCommands),
 ]
 
 

@@ -200,19 +200,20 @@ class SchedulerDependentManager(Manager):
     """
 
     def __init__(self, host=None, db_driver=None, service_name='undefined'):
-        self.last_capabilities = None
+        self.last_capabilities = {}
         self.service_name = service_name
         self.scheduler_rpcapi = scheduler_rpcapi.SchedulerAPI()
         super(SchedulerDependentManager, self).__init__(host, db_driver)
 
-    def update_service_capabilities(self, capabilities):
+    def update_service_capabilities(self, name, capabilities):
         """Remember these capabilities to send on next periodic update."""
-        self.last_capabilities = capabilities
+        self.last_capabilities[name] = capabilities
 
     @periodic_task
     def _publish_service_capabilities(self, context):
         """Pass data back to the scheduler at a periodic interval."""
-        if self.last_capabilities:
-            LOG.debug(_('Notifying Schedulers of capabilities ...'))
-            self.scheduler_rpcapi.update_service_capabilities(context,
-                    self.service_name, self.host, self.last_capabilities)
+        for capabilities in self.last_capabilities.itervalues():
+            if capabilities:
+                LOG.debug(_('Notifying Schedulers of capabilities ...'))
+                self.scheduler_rpcapi.update_service_capabilities(context,
+                                    self.service_name, self.host, capabilities)

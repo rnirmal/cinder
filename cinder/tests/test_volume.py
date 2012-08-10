@@ -141,8 +141,8 @@ class VolumeTestCase(test.TestCase):
         volume_id = volume['id']
         self.volume.create_volume(self.context, volume_id)
 
-        self.mox.StubOutWithMock(self.volume.driver, 'delete_volume')
-        self.volume.driver.delete_volume(mox.IgnoreArg()) \
+        self.mox.StubOutWithMock(self.volume.get_driver(), 'delete_volume')
+        self.volume.get_driver().delete_volume(mox.IgnoreArg()) \
                                               .AndRaise(exception.VolumeIsBusy)
         self.mox.ReplayAll()
         res = self.volume.delete_volume(self.context, volume_id)
@@ -391,8 +391,8 @@ class VolumeTestCase(test.TestCase):
         snapshot_id = self._create_snapshot(volume_id)['id']
         self.volume.create_snapshot(self.context, volume_id, snapshot_id)
 
-        self.mox.StubOutWithMock(self.volume.driver, 'delete_snapshot')
-        self.volume.driver.delete_snapshot(mox.IgnoreArg()) \
+        self.mox.StubOutWithMock(self.volume.get_driver(), 'delete_snapshot')
+        self.volume.get_driver().delete_snapshot(mox.IgnoreArg()) \
                                             .AndRaise(exception.SnapshotIsBusy)
         self.mox.ReplayAll()
         self.volume.delete_snapshot(self.context, snapshot_id)
@@ -759,7 +759,7 @@ class DriverTestCase(test.TestCase):
         def _fake_execute(_command, *_args, **_kwargs):
             """Fake _execute."""
             return self.output, None
-        self.volume.driver.set_execute(_fake_execute)
+        self.volume.get_driver().set_execute(_fake_execute)
 
     def tearDown(self):
         try:
@@ -788,20 +788,20 @@ class VolumeDriverTestCase(DriverTestCase):
 
     def test_delete_busy_volume(self):
         """Test deleting a busy volume."""
-        self.stubs.Set(self.volume.driver, '_volume_not_present',
+        self.stubs.Set(self.volume.get_driver(), '_volume_not_present',
                        lambda x: False)
-        self.stubs.Set(self.volume.driver, '_delete_volume',
+        self.stubs.Set(self.volume.get_driver(), '_delete_volume',
                        lambda x, y: False)
         # Want DriverTestCase._fake_execute to return 'o' so that
         # volume.driver.delete_volume() raises the VolumeIsBusy exception.
         self.output = 'o'
         self.assertRaises(exception.VolumeIsBusy,
-                          self.volume.driver.delete_volume,
+                          self.volume.get_driver().delete_volume,
                           {'name': 'test1', 'size': 1024})
         # when DriverTestCase._fake_execute returns something other than
         # 'o' volume.driver.delete_volume() does not raise an exception.
         self.output = 'x'
-        self.volume.driver.delete_volume({'name': 'test1', 'size': 1024})
+        self.volume.get_driver().delete_volume({'name': 'test1', 'size': 1024})
 
 
 class ISCSITestCase(DriverTestCase):

@@ -66,39 +66,73 @@ volume_manager_opts = [
     cfg.BoolOpt('volume_force_update_capabilities',
                 default=False,
                 help='if True will force update capabilities on each check'),
+    cfg.BoolOpt('multi_backend_support',
+                default=False,
+                help='Support for more than one backend driver per manager'),
+    cfg.ListOpt('multi_backend_configs',
+                default=[],
+                help='A list of all the backend configs, from the driver to'\
+                     'the custom configs needs to be specified here.'),
     ]
 
 FLAGS = flags.FLAGS
 FLAGS.register_opts(volume_manager_opts)
 
 
+multi_backend_opts = [
+    cfg.StrOpt('volume_driver',
+               default='nova.volume.driver.ISCSIDriver',
+               help='Driver to use for volume creation'),
+    ]
+
+
 class VolumeManager(manager.SchedulerDependentManager):
     """Manages attachable block storage devices."""
     def __init__(self, volume_driver=None, *args, **kwargs):
         """Load the driver from the one specified in args, or from flags."""
-        if not volume_driver:
-            volume_driver = FLAGS.volume_driver
-        self.driver = importutils.import_object(volume_driver)
+        self.drivers = {}
+        LOG.debug("Before loading anything")
+        self._last_volume_stats = {}
+        if FLAGS.multi_backend_support:
+            if FLAGS.multi_backend_configs:
+                for config in FLAGS.multi_backend_configs:
+                    if not config:
+                        continue
+                    config_group = cfg.OptGroup(config)
+                    FLAGS.register_group(config_group)
+                    FLAGS.register_opts(multi_backend_opts, group=config_group)
+                    vol_driver = FLAGS.get(config).volume_driver
+                    self.drivers[config] =\
+                    importutils.import_object(vol_driver, config=config)
+                    self._last_volume_stats[config] = []
+        else:
+            if not volume_driver:
+                volume_driver = FLAGS.volume_driver
+            self.drivers['default'] = importutils.import_object(volume_driver)
+            self._last_volume_stats['default'] = []
+
+        LOG.debug("After loading anything")
         super(VolumeManager, self).__init__(service_name='volume',
-                                                    *args, **kwargs)
+                                            *args, **kwargs)
         # NOTE(vish): Implementation specific db handling is done
         #             by the driver.
-        self.driver.db = self.db
-        self._last_volume_stats = []
+        for driver in self.drivers.itervalues():
+            driver.db = self.db
 
     def init_host(self):
         """Do any initialization that needs to be run if this is a
            standalone service."""
 
         ctxt = context.get_admin_context()
-        self.driver.do_setup(ctxt)
-        self.driver.check_for_setup_error()
+        for driver in self.drivers.itervalues():
+            driver.do_setup(ctxt)
+            driver.check_for_setup_error()
 
         volumes = self.db.volume_get_all_by_host(ctxt, self.host)
         LOG.debug(_("Re-exporting %s volumes"), len(volumes))
         for volume in volumes:
             if volume['status'] in ['available', 'in-use']:
-                self.driver.ensure_export(ctxt, volume)
+                self.get_driver(volume=volume).ensure_export(ctxt, volume)
             else:
                 LOG.info(_("volume %s: skipping export"), volume['name'])
 
@@ -109,23 +143,30 @@ class VolumeManager(manager.SchedulerDependentManager):
                 self.delete_volume(ctxt, volume['id'])
 
     def create_volume(self, context, volume_id, snapshot_id=None,
-                      image_id=None):
+                      image_id=None, backend=None):
         """Creates and exports the volume."""
         context = context.elevated()
         volume_ref = self.db.volume_get(context, volume_id)
         self._notify_about_volume_usage(context, volume_ref, "create.start")
         LOG.info(_("volume %s: creating"), volume_ref['name'])
 
+        backend_id = volume_ref.get('backend_id')
+        if not backend_id and backend:
+            backend_id = self.db.volume_backend_get_by_name(context, backend)
+
         self.db.volume_update(context,
                               volume_id,
-                              {'host': self.host})
+                              {'host': self.host,
+                              'backend_id': backend_id})
         # NOTE(vish): so we don't have to get volume from db again
         #             before passing it to the driver.
         volume_ref['host'] = self.host
+        volume_ref['backend_id'] = backend_id
 
         status = 'available'
         model_update = False
 
+        driver = self.get_driver(volume=volume_ref, backend=backend)
         try:
             vol_name = volume_ref['name']
             vol_size = volume_ref['size']
@@ -153,7 +194,7 @@ class VolumeManager(manager.SchedulerDependentManager):
                 self.db.volume_update(context, volume_ref['id'], model_update)
 
             LOG.debug(_("volume %s: creating export"), volume_ref['name'])
-            model_update = self.driver.create_export(context, volume_ref)
+            model_update = driver.create_export(context, volume_ref)
             if model_update:
                 self.db.volume_update(context, volume_ref['id'], model_update)
 
@@ -187,15 +228,16 @@ class VolumeManager(manager.SchedulerDependentManager):
                     reason=_("Volume is not local to this node"))
 
         self._notify_about_volume_usage(context, volume_ref, "delete.start")
+        driver = self.get_driver(volume=volume_ref)
         self._reset_stats()
         try:
             LOG.debug(_("volume %s: removing export"), volume_ref['name'])
-            self.driver.remove_export(context, volume_ref)
+            driver.remove_export(context, volume_ref)
             LOG.debug(_("volume %s: deleting"), volume_ref['name'])
-            self.driver.delete_volume(volume_ref)
+            driver.delete_volume(volume_ref)
         except exception.VolumeIsBusy:
             LOG.debug(_("volume %s: volume is busy"), volume_ref['name'])
-            self.driver.ensure_export(context, volume_ref)
+            driver.ensure_export(context, volume_ref)
             self.db.volume_update(context, volume_ref['id'],
                                   {'status': 'available'})
             return True
@@ -229,10 +271,12 @@ class VolumeManager(manager.SchedulerDependentManager):
         snapshot_ref = self.db.snapshot_get(context, snapshot_id)
         LOG.info(_("snapshot %s: creating"), snapshot_ref['name'])
 
+        volume_ref = self.db.volume_get(context, volume_id)
+        driver = self.get_driver(volume=volume_ref)
         try:
             snap_name = snapshot_ref['name']
             LOG.debug(_("snapshot %(snap_name)s: creating") % locals())
-            model_update = self.driver.create_snapshot(snapshot_ref)
+            model_update = driver.create_snapshot(snapshot_ref)
             if model_update:
                 self.db.snapshot_update(context, snapshot_ref['id'],
                                         model_update)
@@ -253,10 +297,11 @@ class VolumeManager(manager.SchedulerDependentManager):
         """Deletes and unexports snapshot."""
         context = context.elevated()
         snapshot_ref = self.db.snapshot_get(context, snapshot_id)
-
+        volume_ref = self.db.volume_get(context, snapshot_ref['volume_id'])
+        driver = self.get_driver(volume=volume_ref)
         try:
             LOG.debug(_("snapshot %s: deleting"), snapshot_ref['name'])
-            self.driver.delete_snapshot(snapshot_ref)
+            driver.delete_snapshot(snapshot_ref)
         except exception.SnapshotIsBusy:
             LOG.debug(_("snapshot %s: snapshot is busy"), snapshot_ref['name'])
             self.db.snapshot_update(context,
@@ -389,7 +434,8 @@ class VolumeManager(manager.SchedulerDependentManager):
               data types.
         """
         volume_ref = self.db.volume_get(context, volume_id)
-        return self.driver.initialize_connection(volume_ref, connector)
+        driver = self.get_driver(volume=volume_ref)
+        return driver.initialize_connection(volume_ref, connector)
 
     def terminate_connection(self, context, volume_id, connector):
         """Cleanup connection from host represented by connector.
@@ -397,7 +443,8 @@ class VolumeManager(manager.SchedulerDependentManager):
         The format of connector is the same as for initialize_connection.
         """
         volume_ref = self.db.volume_get(context, volume_id)
-        self.driver.terminate_connection(volume_ref, connector)
+        driver = self.get_driver(volume=volume_ref)
+        driver.terminate_connection(volume_ref, connector)
 
     def _volume_stats_changed(self, stat1, stat2):
         if FLAGS.volume_force_update_capabilities:
@@ -411,25 +458,29 @@ class VolumeManager(manager.SchedulerDependentManager):
 
     @manager.periodic_task
     def _report_driver_status(self, context):
-        volume_stats = self.driver.get_volume_stats(refresh=True)
-        if volume_stats:
-            LOG.info(_("Checking volume capabilities"))
+        for name, driver in self.drivers.iteritems():
+            volume_stats = driver.get_volume_stats(refresh=True)
+            if volume_stats:
+                LOG.info(_("Checking volume capabilities"))
 
-            if self._volume_stats_changed(self._last_volume_stats,
-                                          volume_stats):
-                LOG.info(_("New capabilities found: %s"), volume_stats)
-                self._last_volume_stats = volume_stats
+                if self._volume_stats_changed(self._last_volume_stats[name],
+                                              volume_stats):
+                    LOG.info(_("New capabilities found: %s"), volume_stats)
+                    self._last_volume_stats[name] = volume_stats
 
-                # This will grab info about the host and queue it
-                # to be sent to the Schedulers.
-                self.update_service_capabilities(self._last_volume_stats)
-            else:
-                # avoid repeating fanouts
-                self.update_service_capabilities(None)
+                    # This will grab info about the host and queue it
+                    # to be sent to the Schedulers.
+                    self.update_service_capabilities(name,
+                                                self._last_volume_stats[name])
+                else:
+                    # avoid repeating fanouts
+                    self.update_service_capabilities(name, None)
 
     def _reset_stats(self):
         LOG.info(_("Clear capabilities"))
-        self._last_volume_stats = []
+        for name in self._last_volume_stats.iterkeys():
+            self._last_volume_stats[name] = []
+        self._report_driver_status(context.get_admin_context())
 
     def notification(self, context, event):
         LOG.info(_("Notification {%s} received"), event)
@@ -440,3 +491,26 @@ class VolumeManager(manager.SchedulerDependentManager):
         volume_utils.notify_about_volume_usage(
                 context, volume, event_suffix,
                 extra_usage_info=extra_usage_info, host=self.host)
+
+    def get_driver(self, volume=None, backend=None):
+        """Return the appropriate driver based on either the volume or the
+        specified backend."""
+        ctxt = context.get_admin_context()
+        if volume:
+            if volume['backend_id']:
+                backend = self.db.volume_backend_get(ctxt,
+                                                     volume['backend_id'])
+                driver = self.drivers.get(backend['name'])
+            else:
+                driver = self.drivers.get('default')
+        elif backend:
+            backend_ref = self.db.volume_backend_get_by_name(ctxt, backend)
+            driver = self.drivers.get(backend_ref['name'])
+        else:
+            driver = self.drivers.get('default')
+
+        if not driver:
+            LOG.error(_("Cannot find the appropriate backend for volume: %s or"
+                        " backend: %s") % (volume, backend))
+            raise exception.VolumeBackendNotFound(volume_backend_id=backend)
+        return driver

@@ -76,10 +76,42 @@ volume_opts = [
 FLAGS = flags.FLAGS
 FLAGS.register_opts(volume_opts)
 
+multi_backend_opts = [
+    cfg.StrOpt('volume_group',
+               default='cinder-volumes',
+               help='Name for the VG that will contain exported volumes'),
+    cfg.StrOpt('iscsi_target_prefix',
+               default='iqn.2010-10.org.openstack:',
+               help='prefix for iscsi volumes'),
+    cfg.StrOpt('iscsi_ip_address',
+               default='$my_ip',
+               help='use this ip for iscsi'),
+    cfg.IntOpt('iscsi_port',
+               default=3260,
+               help='The port that the iSCSI daemon is listening on'),
+    cfg.StrOpt('rbd_pool',
+               default='rbd',
+               help='the RADOS pool in which rbd volumes are stored'),
+    cfg.StrOpt('rbd_user',
+               default=None,
+               help='the RADOS client name for accessing rbd volumes'),
+    cfg.StrOpt('rbd_secret_uuid',
+               default=None,
+               help='the libvirt uuid of the secret for the rbd_user'
+                    'volumes'),
+    ]
+
 
 class VolumeDriver(object):
     """Executes commands relating to Volumes."""
     def __init__(self, execute=utils.execute, *args, **kwargs):
+        config = kwargs.get('config')
+        if config:
+            FLAGS.register_opts(multi_backend_opts, group=config)
+            self.volume_group = FLAGS.get(config).volume_group
+        else:
+            self.volume_group = FLAGS.volume_group
+
         # NOTE(vish): db is set by Manager
         self.db = None
         self.set_execute(execute)
@@ -109,14 +141,14 @@ class VolumeDriver(object):
         out, err = self._execute('vgs', '--noheadings', '-o', 'name',
                                 run_as_root=True)
         volume_groups = out.split()
-        if not FLAGS.volume_group in volume_groups:
+        if not self.volume_group in volume_groups:
             exception_message = (_("volume group %s doesn't exist")
-                                  % FLAGS.volume_group)
+                                  % self.volume_group)
             raise exception.VolumeBackendAPIException(data=exception_message)
 
     def _create_volume(self, volume_name, sizestr):
         self._try_execute('lvcreate', '-L', sizestr, '-n',
-                          volume_name, FLAGS.volume_group, run_as_root=True)
+                          volume_name, self.volume_group, run_as_root=True)
 
     def _copy_volume(self, srcstr, deststr, size_in_g):
         # Use O_DIRECT to avoid thrashing the system buffer cache
@@ -135,7 +167,7 @@ class VolumeDriver(object):
                       *direct_flags, run_as_root=True)
 
     def _volume_not_present(self, volume_name):
-        path_name = '%s/%s' % (FLAGS.volume_group, volume_name)
+        path_name = '%s/%s' % (self.volume_group, volume_name)
         try:
             self._try_execute('lvdisplay', path_name, run_as_root=True)
         except Exception as e:
@@ -153,7 +185,7 @@ class VolumeDriver(object):
             self._try_execute('dmsetup', 'remove', '-f', dev_path,
                               run_as_root=True)
         self._try_execute('lvremove', '-f', "%s/%s" %
-                          (FLAGS.volume_group,
+                          (self.volume_group,
                            self._escape_snapshot(volume['name'])),
                           run_as_root=True)
 
@@ -190,7 +222,7 @@ class VolumeDriver(object):
         # deleting derived snapshots. Can we do something fancy?
         out, err = self._execute('lvdisplay', '--noheading',
                                  '-C', '-o', 'Attr',
-                                 '%s/%s' % (FLAGS.volume_group,
+                                 '%s/%s' % (self.volume_group,
                                             volume['name']),
                                  run_as_root=True)
         # fake_execute returns None resulting unit test error
@@ -203,7 +235,7 @@ class VolumeDriver(object):
 
     def create_snapshot(self, snapshot):
         """Creates a snapshot."""
-        orig_lv_name = "%s/%s" % (FLAGS.volume_group, snapshot['volume_name'])
+        orig_lv_name = "%s/%s" % (self.volume_group, snapshot['volume_name'])
         self._try_execute('lvcreate', '-L',
                           self._sizestr(snapshot['volume_size']),
                           '--name', self._escape_snapshot(snapshot['name']),
@@ -221,7 +253,7 @@ class VolumeDriver(object):
 
     def local_path(self, volume):
         # NOTE(vish): stops deprecation warning
-        escaped_group = FLAGS.volume_group.replace('-', '--')
+        escaped_group = self.volume_group.replace('-', '--')
         escaped_name = self._escape_snapshot(volume['name']).replace('-', '--')
         return "/dev/mapper/%s-%s" % (escaped_group, escaped_name)
 
@@ -300,6 +332,17 @@ class ISCSIDriver(VolumeDriver):
     """
 
     def __init__(self, *args, **kwargs):
+        config = kwargs.get('config')
+        if config:
+            FLAGS.register_opts(multi_backend_opts, group=config)
+            self.iscsi_target_prefix = FLAGS.get(config).iscsi_target_prefix
+            self.iscsi_ip_address = FLAGS.get(config).iscsi_ip_address
+            self.iscsi_port = FLAGS.get(config).iscsi_port
+        else:
+            self.iscsi_target_prefix = FLAGS.iscsi_target_prefix
+            self.iscsi_ip_address = FLAGS.iscsi_ip_address
+            self.iscsi_port = FLAGS.iscsi_port
+
         self.tgtadm = iscsi.get_target_admin()
         super(ISCSIDriver, self).__init__(*args, **kwargs)
 
@@ -323,8 +366,8 @@ class ISCSIDriver(VolumeDriver):
         else:
             iscsi_target = 1  # dummy value when using TgtAdm
 
-        iscsi_name = "%s%s" % (FLAGS.iscsi_target_prefix, volume['name'])
-        volume_path = "/dev/%s/%s" % (FLAGS.volume_group, volume['name'])
+        iscsi_name = "%s%s" % (self.iscsi_target_prefix, volume['name'])
+        volume_path = "/dev/%s/%s" % (self.volume_group, volume['name'])
 
         # NOTE(jdg): For TgtAdm case iscsi_name is the ONLY param we need
         # should clean this all up at some point in the future
@@ -374,8 +417,10 @@ class ISCSIDriver(VolumeDriver):
                                               iscsi_target,
                                               0,
                                               volume_path)
-        model_update['provider_location'] = _iscsi_location(
-            FLAGS.iscsi_ip_address, tid, iscsi_name, lun)
+        model_update['provider_location'] = "%s:%s,%s %s %s" % \
+                                                (self.iscsi_ip_address,
+                                                 self.iscsi_port,
+                                                 iscsi_target, iscsi_name, lun)
         return model_update
 
     def remove_export(self, context, volume):
@@ -904,7 +949,3 @@ class LoggingVolumeDriver(VolumeDriver):
             if match:
                 matches.append(entry)
         return matches
-
-
-def _iscsi_location(ip, target, iqn, lun=None):
-    return "%s:%s,%s %s %s" % (ip, FLAGS.iscsi_port, target, iqn, lun)
